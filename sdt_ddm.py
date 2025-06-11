@@ -2,6 +2,7 @@
 Signal Detection Theory (SDT) and Delta Plot Analysis for Response Time Data
 """
 
+from datetime import datetime
 import numpy as np
 import pymc as pm
 import arviz as az
@@ -211,7 +212,7 @@ def apply_hierarchical_sdt_model(data):
     
     return sdt_model
 
-def draw_delta_plots(data, pnum):
+def draw_delta_plots(data, pnum, output_dir_path):
     """Draw delta plots comparing RT distributions between condition pairs.
     
     Creates a matrix of delta plots where:
@@ -221,6 +222,7 @@ def draw_delta_plots(data, pnum):
     Args:
         data: DataFrame with RT percentile data
         pnum: Participant number to plot
+        output_dir_path: path of output directory
     """
     # Filter data for specified participant
     data = data[data['pnum'] == pnum]
@@ -234,8 +236,7 @@ def draw_delta_plots(data, pnum):
                             figsize=(4*n_conditions, 4*n_conditions))
     
     # Create output directory
-    OUTPUT_DIR = Path(__file__).parent.parent.parent / 'output'
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    #OUTPUT_DIR = Path(__file__).parent.parent.parent / 'output'
     
     # Define marker style for plots
     marker_style = {
@@ -310,10 +311,141 @@ def draw_delta_plots(data, pnum):
             plt.tight_layout()
             
     # Save the figure
-    plt.savefig(OUTPUT_DIR / f'delta_plots_{pnum}.png')
+    plt.savefig(output_dir_path / f'delta_plots_{pnum}.png')
+
+
+def analyze_sdt_data(sdt_data, output_dir_path):
+    sdt_model = apply_hierarchical_sdt_model(sdt_data)
+
+    # Sample from the posterior distribution
+    print("\nSampling from SDT model posterior... (This may take a while)")
+    with sdt_model:
+        sdt_trace = pm.sample(2000, tune=1000, chains=4, return_inferencedata=True)
+
+    # Check for convergence
+    print("\n--- SDT Model Convergence Statistics (Rhat) ---")
+    print(az.rhat(sdt_trace, var_names=['mean_d_prime', 'mean_criterion', 'stdev_d_prime', 'stdev_criterion']))
+
+    print("\n--- SDT Model Effective Sample Sizes (ESS) ---")
+    print(az.ess(sdt_trace, var_names=['mean_d_prime', 'mean_criterion', 'stdev_d_prime', 'stdev_criterion']))
+
+    # Display posterior distributions
+    print("\n--- SDT Model Posterior Distributions ---")
+    # Population-level estimates
+    print("\nPopulation-level (mean) parameters:")
+    print(az.summary(sdt_trace, var_names=['mean_d_prime', 'mean_criterion'], round_to=2))
+
+    # Person-specific estimates (example for first few participants and conditions)
+    print("\nIndividual-level parameters (first 5 participants, all conditions):")
+    # We need to map the condition indices back to names for clarity
+    participant_ids = sdt_data['pnum'].unique()
+    conditions = sdt_data['condition'].unique()
+
+    # Create a mapping from numeric condition to descriptive name
+    condition_idx_to_name = {v: k for k, v in MAPPINGS['stimulus_type'].items()}
+    condition_idx_to_name.update({v: k for k, v in MAPPINGS['difficulty'].items()})
+    condition_idx_to_name = {
+        0: 'Easy Simple',
+        1: 'Easy Complex',
+        2: 'Hard Simple',
+        3: 'Hard Complex'
+    }
+
+
+    # Summarize d_prime and criterion for each participant and condition
+    d_prime_summary = az.summary(sdt_trace, var_names=['d_prime'], round_to=2)
+    criterion_summary = az.summary(sdt_trace, var_names=['criterion'], round_to=2)
+
+    # Print formatted individual estimates
+    print("\nIndividual d_prime estimates:")
+    for i, p_id in enumerate(participant_ids[:5]): # Limiting to first 5 participants
+        for j, cond_idx in enumerate(conditions):
+            # Arviz summary uses a flat index for shape=(P,C) parameters like 'd_prime[0,0]'
+            # So we need to construct the correct index string
+            dp_param_name = f'd_prime[{i}, {cond_idx}]'
+            crit_param_name = f'criterion[{i}, {cond_idx}]'
+                
+            dp_mean = d_prime_summary.loc[dp_param_name, 'mean'] if dp_param_name in d_prime_summary.index else 'N/A'
+            dp_sd = d_prime_summary.loc[dp_param_name, 'sd'] if dp_param_name in d_prime_summary.index else 'N/A'
+                
+            crit_mean = criterion_summary.loc[crit_param_name, 'mean'] if crit_param_name in criterion_summary.index else 'N/A'
+            crit_sd = criterion_summary.loc[crit_param_name, 'sd'] if crit_param_name in criterion_summary.index else 'N/A'
+
+            print(f"  P{p_id} - {condition_idx_to_name.get(cond_idx, f'Cond{cond_idx}')}: d_prime = {dp_mean} (SD={dp_sd}), criterion = {crit_mean} (SD={crit_sd})")
+
+    # Plot posterior distributions for population-level parameters
+    az.plot_posterior(sdt_trace, var_names=['mean_d_prime', 'mean_criterion'])
+    plt.suptitle("Posterior Distributions of Population-level SDT Parameters")
+    plt.savefig(output_dir_path / 'sdt_posterior_population.png')
+    plt.close()
+
+    # Plot posterior distributions for standard deviations
+    az.plot_posterior(sdt_trace, var_names=['stdev_d_prime', 'stdev_criterion'])
+    plt.suptitle("Posterior Distributions of SDT Parameter Standard Deviations")
+    plt.savefig(output_dir_path / 'sdt_posterior_stdev.png')
+    plt.close()
+
+
+def run_sdt_model_analysis(data_file_path, output_dir_path):
+    '''Running SDT Model Analysis
+
+    Args:
+        file_path: Path to the CSV file containing raw response data
+    '''
+
+    print("--- Running SDT Model Analysis ---")
+    sdt_data = read_data(data_file_path, prepare_for='sdt', display=True)
+
+    if not sdt_data.empty:
+        #print(sdt_data)   # For debugging
+
+        analyze_sdt_data(sdt_data, output_dir_path)
+        print("SDT data analysis generated and saved in the " + str(output_dir_path) + " directory.")
+    else:
+        print("SDT data is empty. Skipping SDT model analysis.")
+
+
+def run_delta_plot_analysis(data_file_path, output_dir_path):
+    '''Running Delta Plot Analysis
+
+    Args:
+        file_path: Path to the CSV file containing raw response data
+    '''
+    # --- Delta Plot Analysis ---
+    print("\n--- Running Delta Plot Analysis ---")
+    delta_plot_data = read_data(data_file_path, prepare_for='delta plots', display=True)
+
+    if not delta_plot_data.empty:
+        #print(delta_plot_data)   # For debugging
+
+        # Get unique participant numbers for delta plots
+        participant_numbers_for_delta_plots = delta_plot_data['pnum'].unique()
+
+        # Draw delta plots for each participant
+        for pnum in participant_numbers_for_delta_plots:
+            print(f"Generating delta plots for participant {pnum}...")
+            draw_delta_plots(delta_plot_data, pnum, output_dir_path)
+        print("Delta plots generated and saved in the " + str(output_dir_path) + " directory.")
+    else:
+        print("Delta plot data is empty. Skipping delta plot analysis.")
+
 
 # Main execution
 if __name__ == "__main__":
-    file_to_print = Path(__file__).parent / 'README.md'
-    with open(file_to_print, 'r') as file:
-        print(file.read())
+    data_file_path = Path(__file__).parent /'data.csv'
+
+    # Create output directory
+    OUTPUT_DIR_NAME = 'output_' + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    OUTPUT_DIR_PATH = Path(__file__).parent / OUTPUT_DIR_NAME
+    os.makedirs(OUTPUT_DIR_PATH, exist_ok=True)
+
+    ### For debugging
+    #with open(data_file_path, 'r') as file:
+    #    print(file.read())
+    ###
+
+    # --- SDT Model Analysis ---
+    run_sdt_model_analysis(data_file_path, OUTPUT_DIR_PATH)
+
+    # --- Delta Plot Analysis ---
+    run_delta_plot_analysis(data_file_path, OUTPUT_DIR_PATH)
