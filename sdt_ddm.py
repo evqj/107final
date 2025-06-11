@@ -1,5 +1,6 @@
 """
 Signal Detection Theory (SDT) and Delta Plot Analysis for Response Time Data
+Used Google and ChatGPT for assistance
 """
 
 from datetime import datetime
